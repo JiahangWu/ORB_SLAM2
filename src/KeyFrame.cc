@@ -143,7 +143,7 @@ void KeyFrame::UpdateConnections()
 			
 		map<KeyFrame*, size_t> observations = pMP->GetObservations();
 		
-		for (map<KeyFrame*, size_t>::iterator mit = observations.begin(), observations.end(); mit != mend; mit++)
+		for (map<KeyFrame*, size_t>::iterator mit = observations.begin(), mend = observations.end(); mit != mend; mit++)
 		{
 			if(mit->first->mnId == mnId)
 				continue;

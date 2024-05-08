@@ -102,7 +102,7 @@ void LocalMapping::ProcessNewKeyFrame()
 
 void LocalMapping::MapPointCulling()
 {
-	list<MapPoint*>::iterator list = mlpRecentAddedMapPoints.begin();
+	list<MapPoint*>::iterator lit = mlpRecentAddedMapPoints.begin();
 	const unsigned long int nCurrentKFid = mpCurrentKeyFrame->mnId;
 	
 	int nThObs;
