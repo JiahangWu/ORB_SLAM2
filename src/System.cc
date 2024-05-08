@@ -8,7 +8,7 @@
 namespace ORB_SLAM2
 {
 System::System(const string &strVocFile,
-			   const string &strSettingFile,
+			   const string &strSettingsFile,
 			   const eSensor sensor,
 			   const bool bUseViewer):
 					 mSensor(sensor),
@@ -29,11 +29,11 @@ System::System(const string &strVocFile,
 		cout << "RGBD" << endl;
 		
 	
-	cv::FileStorage fsSettings(strSettingFile.c_str(),
+	cv::FileStorage fsSettings(strSettingsFile.c_str(),
 							   cv::FileStorage::READ);
 	if(!fsSettings.isOpened())
 	{
-		cerr << "Failed to open settings file at: " << strSettingFile << endl;
+		cerr << "Failed to open settings file at: " << strSettingsFile << endl;
 		exit(-1);
 	}
 	
@@ -57,7 +57,7 @@ System::System(const string &strVocFile,
 	mpMap = new Map();
 	
 	mpFrameDrawer = new FrameDrawer(mpMap);
-	mpMapDrawer = new MapDrawer(mpMap, strSettingFile);
+	mpMapDrawer = new MapDrawer(mpMap, strSettingsFile);
 	
 	mpTracker = new Tracking(this,
 							 mpVocabulary,
@@ -65,12 +65,43 @@ System::System(const string &strVocFile,
 							 mpMapDrawer,
 							 mpMap,
 							 mpKeyFrameDatabase,
-							 strSettingFile,
+							 strSettingsFile,
 							 mSensor);
 	
 	mpLocalMapper = new LocalMapping(mpMap, mSensor==MONOCULAR);
 	
 	mptLocalMapping = new thread(&ORB_SLAM2::LocalMapping::Run, mpLocalMapper);
+	
+	mpLoopCloser = new LoopClosing(mpMap,
+									mpKeyFrameDatabase,
+									mpVocabulary,
+									mSensor!=MONOCULAR);
+		
+	mptLoopClosing = new thread(&ORB_SLAM2::LoopClosing::Run,
+								mpLoopCloser);
+	
+	if(bUseViewer)
+	{
+		mpViewer = new Viewer(this,
+							  mpFrameDrawer,
+							  mpMapDrawer,
+							  mpTracker,
+							  strSettingsFile);
+		
+		mptViewer = new thread(&Viewer::Run, mpViewer);
+		
+		mpTracker->SetViewer(mpViewer);
+	}
+	
+	mpTracker->SetLocalMapper(mpLocalMapper);
+	mpTracker->SetLoopClosing(mpLoopCloser);
+	
+	mpLocalMapper->SetTracker(mpTracker);
+	mpLocalMapper->SetLoopCloser(mpLoopCloser);
+	
+	mpLoopCloser->SetTracker(mpTracker);
+	mpLoopCloser->SetLocalMapper(mpLocalMapper);
+	
 	
 }
 

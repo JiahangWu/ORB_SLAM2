@@ -90,11 +90,13 @@ private:
 	
 	LoopClosing* mpLocalCloser;
 	
+	LoopClosing *mpLoopCloser;
+	
 	Viewer* mpViewer;
 	FrameDrawer* mpFrameDrawer;
 	MapDrawer* mpMapDrawer;
 	
-	std::thread* mpLocalMapping;
+	std::thread* mptLocalMapping;
 	std::thread* mptLoopClosing;
 	std::thread* mptViewer;
 	

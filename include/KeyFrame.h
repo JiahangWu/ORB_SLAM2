@@ -29,7 +29,7 @@ public:
 	cv::Mat GetPoseInverse();
 	cv::Mat GetCameraCenter();
 	cv::Mat GetStereoCenter();
-	cv::Mat GetRoration();
+	cv::Mat GetRotation();
 	cv::Mat GetTranslation();
 	
 	void ComputeBoW();

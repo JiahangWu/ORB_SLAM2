@@ -188,7 +188,7 @@ public:
 public:
 	
 	static const int TH_LOW;
-	static const int TH_HIGHT;
+	static const int TH_HIGH;
 	static const int HISTO_LENGTH;
 	
 protected:
@@ -197,6 +197,8 @@ protected:
 	float RadiusByViewingCos(const float &viewCos);
 	void ComputeThreeMaxima(std::vector<int> *histo, const int L, int &ind1, int &ind2, int &ind3);
 	
+    float mfNNratio;
+    bool mbCheckOrientation;
 };
 
 

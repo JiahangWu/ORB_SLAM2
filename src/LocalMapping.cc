@@ -15,6 +15,17 @@ LocalMapping::LocalMapping(Map *pMap, const float bMonocular):
 	
 }
 
+// 设置回环检测线程句柄
+void LocalMapping::SetLoopCloser(LoopClosing* pLoopCloser)
+{
+    mpLoopCloser = pLoopCloser;
+}
+
+// 设置追踪线程句柄
+void LocalMapping::SetTracker(Tracking *pTracker)
+{
+    mpTracker=pTracker;
+}
 
 void LocalMapping::Run()
 {
@@ -23,15 +34,17 @@ void LocalMapping::Run()
 	while(1)
 	{
 		SetAcceptKeyFrames(false);
-	}
-	if(CheckNewKeyFrames())
-	{
-		ProcessNewKeyFrame();
 		
-		MapPointCulling();
-		
-		CreateNewMapPoints();
+		if(CheckNewKeyFrames())
+		{
+			ProcessNewKeyFrame();
+			
+			MapPointCulling();
+			
+			CreateNewMapPoints();
+		}
 	}
+	
 }
 
 void LocalMapping::SetAcceptKeyFrames(bool flag)
@@ -134,7 +147,53 @@ void LocalMapping::CreateNewMapPoints()
 		const vector<KeyFrame*> vpNeighKFs = mpCurrentKeyFrame->GetBestCovisibilityKeyFrames(nn);
 		
 		ORBmatcher matcher(0.6, false);
+		
+		cv::Mat Rcw1 = mpCurrentKeyFrame->GetRotation();
+		cv::Mat Rwc1 = Rcw1.t();
+		cv::Mat tcw1 = mpCurrentKeyFrame->GetTranslation();
+		cv::Mat Tcw1(3, 4, CV_32F);
+		Rcw1.copyTo(Tcw1.colRange(0, 3));
+		tcw1.copyTo(Tcw1.col(3));
+		
+		cv::Mat Ow1 = mpCurrentKeyFrame->GetCameraCenter();
+		const float &fx1 = mpCurrentKeyFrame->fx;
+		const float &fy1 = mpCurrentKeyFrame->fy;
+		const float &cx1 = mpCurrentKeyFrame->cx;
+		const float &cy1 = mpCurrentKeyFrame->cy;
+		const float &invfx1 = mpCurrentKeyFrame->invfx;
+		const float &invfy1 = mpCurrentKeyFrame->invfy;
+		
+		const float ratioFactor = 1.5f * mpCurrentKeyFrame->mfScaleFactor;
+		
+		int nnew = 0;
+		for (size_t i = 0; i < vpNeighKFs.size(); i++)
+		{
+			if(i > 0 && CheckNewKeyFrames())
+				return;
+			
+			KeyFrame *pKF2 = vpNeighKFs[i];
+			
+			cv::Mat Ow2 = pKF2->GetCameraCenter();
+			cv::Mat vBaseline = Ow2 - Ow1;
+			const float baseline = cv::norm(vBaseline);
+			
+			if(!mbMonocular)
+			{
+				if(baseline < pKF2->mb)
+					continue;
+			}
+			else
+			{
+				const float medianDepthKF2 = pKF2->ComputeSceneMedianDepth(2);
+				
+				const float ratioBaselineDepth = baseline/medianDepthKF2;
+				if(ratioBaselineDepth < 0.01)
+					continue;
+			}
+		}
 }
+
+
 
 
 } // namespace ORB_SLAM2

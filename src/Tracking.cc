@@ -52,7 +52,7 @@ Tracking::Tracking(
 	cv::Mat K = cv::Mat::eye(3,3,CV_32F);
 	K.at<float>(0,0) = fx;
 	K.at<float>(1,1) = fy;
-	k.at<float>(0,2) = cx;
+	K.at<float>(0,2) = cx;
 	K.at<float>(1,2) = cy;
 	K.copyTo(mK);
 	
@@ -95,7 +95,7 @@ Tracking::Tracking(
 	
 	
 	int nRGB = fSettings["Camera.RGB"];
-	mRGB = nRGB;
+	mbRGB = nRGB;
 	
 	if(mbRGB)
 		cout << "- color order: RGB (ignored if grayscale)" << endl;
@@ -129,8 +129,15 @@ Tracking::Tracking(
 	
 }
 
+void Tracking::SetLocalMapper(LocalMapping *pLocalMapper)
+{
+	mpLocalMapper = pLocalMapper;
+}
 
-
+void Tracking::SetLoopClosing(LoopClosing *pLoopClosing)
+{
+	mpLoopClosing = pLoopClosing;
+}
 
 
 
