@@ -352,6 +352,61 @@ ORBextractor::ORBextractor(int _nfeatures,
 		}
 }
 
+void ORBextractor::operator()(cv::InputArray _image, cv::InputArray _mask, vector<KeyPoint> & _keypoints, 
+	cv::OutputArray _descriptors)
+{
+	if(_image.empty())
+		return;
+	
+	cv::Mat image = _image.getMat();
+	assert(image.type() == cv::CV_8UC1);
+	
+	ComputePyramid(image);
+	vector<vector<KeyPoint>> allKeypoints;
+	
+	ComputeKeyPointsOctTree(allKeypoints);
+	
+	
+	
+	
+}
 
+void ORBextractor::ComputePyramid(cv::Mat image)
+{
+	for (int level = 0; level < nlevels; level++)
+	{
+		float scale = mvInvScaleFactor[level];
+		Size sz(cvRound((float)image.cols * scale), cvRound((float)image.rows * scale));
+		Size wholeSize(sz.width + EDGE_THRESHOLD*2, sz.height + EDGE_THRESHOLD*2);
+		Mat temp(wholeSize, image.type()), masktemp;
+		
+		mvImagePyramid[level] = temp(Rect(EDGE_THRESHOLD, EDGE_THRESHOLD, sz.width, sz.height));
+		
+		if(level != 0)
+		{
+			resize(mvImagePyramid[level-1],
+				   mvImagePyramid[level],
+				   sz,
+				   0,
+				   0,
+				   cv::INTER_AREA);
+			
+			copyMakeBorder(mvImagePyramid[level],
+						   temp,
+						   EDGE_THRESHOLD, EDGE_THRESHOLD,
+						   EDGE_THRESHOLD, EDGE_THRESHOLD,
+						   BORDER_REFLECT101 + BORDER_ISOLATED);
+		}
+		else
+		{
+			copyMakeBorder(image,
+						   temp, EDGE_THRESHOLD, EDGE_THRESHOLD,EDGE_THRESHOLD, EDGE_THRESHOLD,
+						   BORDER_REFLECT_101);
+		}
+		
+		
+	}
+	
+}
 
 } // namespace ORB_SLAM2

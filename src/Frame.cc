@@ -50,9 +50,30 @@ Frame::Frame(const Frame &frame)
 		
 }
 
-Frame::Frame()
+Frame::Frame(const cv::Mat &imGray, const double &timeStamp, ORBextractor *extractor, ORBVocabulary *voc, cv::Mat &K, cv::Mat &distCoef, const float &bf, const float &thDepth):
+	mpORBvocabulary(voc), mpORBextractorLeft(extractor), mpORBextractorRight(static_cast<ORBextractor*>(NULL)),
+	mTimeStamp(timeStamp), mK(K.clone()), mDistCoef(distCoef.clone()), mbf(bf), mThDepth(thDepth)
 {
+	mnId = nNextId++;
 	
+	mnScaleLevels = mpORBextractorLeft->GetLevels();
+	mfScaleFactor = mpORBextractorLeft->GetScaleFactor();
+	mfLogScaleFactor = log(mfScaleFactor);
+	mvScaleFactors = mpORBextractorLeft->GetScaleFactors();
+	mvInvScaleFactors = mpORBextractorLeft->GetInverseScaleFactors();
+	mvLevelSigma2 = mpORBextractorLeft->GetInverseScaleFactors();
+	mvInvLevelSigma2 = mpORBextractorLeft->GetInverseScaleSigmaSquares();
+	
+	ExtractORB(0, imGray);
+	
+}
+
+void Frame::ExtractORB(int flag, const cv::Mat &im)
+{
+	if(flag == 0)
+		(*mpORBextractorLeft)(im, cv::Mat(), mvKeys, mDescriptors);
+	else
+		(mpORBextractorRight)(im, cv::Mat(), mvKeysRight, mDescriptorsRight);
 }
 
 
