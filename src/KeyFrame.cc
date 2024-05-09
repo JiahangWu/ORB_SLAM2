@@ -268,4 +268,10 @@ float KeyFrame::ComputeSceneMedianDepth(const int q)
 }
 
 
+bool KeyFrame::isBad()
+{
+	unique_lock<mutex> lock(mMutexConnections);
+	return mbBad;
+}
+
 } // namespace ORB_SLAM2

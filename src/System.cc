@@ -105,8 +105,66 @@ System::System(const string &strVocFile,
 	
 }
 
+void System::ActivateLocalizationMode()
+{
+	unique_lock<mutex> lock(mMutexMode);
+	mbActivateLocalizationMode = true;
+}
+
+void System::DeactivateLocalizationMode()
+{
+	unique_lock<mutex> lock(mMutexMode);
+	mbDeactivateLocalizationMode = true;
+}
 
 
+cv::Mat System::TrackMonocular(const cv::Mat &im, const double &timestamp)
+{
+	if(mSensor != MONOCULAR)
+	{
+		cerr << "ERROR: you called TrackMonocular but input sensor was not set to Monocular." << endl;
+        exit(-1);
+	}
+	{
+		unique_lock<mutex> lock(mMutexMode);
+		if(mbActivateLocalizationMode)
+		{
+			mpLocalMapper->RequestStop();
+			while(!mpLocalMapper->isStopped())
+			{
+				usleep(1000);
+			}
+			mpTracker->InformOnlyTracking(true);
+			mbActivateLocalizationMode = false;
+		}
+		
+		if(mbDeactivateLocalizationMode)
+		{
+			mpTracker->InformOnlyTracking(false);
+			mpLocalMapper->Release();
+			mbDeactivateLocalizationMode = false;
+		}
+	}
+	
+	{
+		unique_lock<mutex> lock(mMutexReset);
+		if(mbReset)
+		{
+			mpTracker->Reset();
+			mbReset = false;
+		}
+	}
+	
+	cv::Mat Tcw = mpTracker->GrabImageMonocular(im, timestamp);
+	
+	
+}
+
+void System::Reset()
+{
+	unique_lock<mutex> lock(mMutexReset);
+	mbReset = true;
+}
 
 
 } // namespace ORB_SLAM2

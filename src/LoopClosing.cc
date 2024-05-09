@@ -38,6 +38,28 @@ void LoopClosing::Run()
 {
 	
 }
+void LoopClosing::RequestReset()
+{
+    // 标志置位
+    {
+        unique_lock<mutex> lock(mMutexReset);
+        mbResetRequested = true;
+    }
+
+    // 堵塞,直到回环检测线程复位完成
+    while(1)
+    {
+        {
+        unique_lock<mutex> lock2(mMutexReset);
+        if(!mbResetRequested)
+            break;
+        }
+		//usleep(5000);
+		std::this_thread::sleep_for(std::chrono::milliseconds(5));
+
+    }
+}
+
 
 
 } // namespace ORB_SLAM2

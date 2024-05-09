@@ -139,7 +139,97 @@ void Tracking::SetLoopClosing(LoopClosing *pLoopClosing)
 	mpLoopClosing = pLoopClosing;
 }
 
+void Tracking::SetViewer(Viewer *pViewer)
+{
+	mpViewer = pViewer;
+}
 
+void Tracking::Reset()
+{
+	if(mpViewer)
+	{
+		mpViewer->RequestStop();
+		while(!mpViewer->isStopped())
+			std::this_thread::sleep_for(std::chrono::milliseconds(3));
+	}
+	
+	cout << "System Reseting" << endl;
+	
+	cout << "Reseting Local Mapper...";
+	mpLocalMapper->RequestReset();
+	cout << " done" << endl;
+	
+	cout << "Reseting Loop Closing...";
+	mpLoopClosing->RequestReset();
+	cout << " done" << endl;
+	
+	mpMap->clear();
+	
+	KeyFrame::nNextId = 0;
+	Frame::nNextId = 0;
+	mState = NO_IMAGES_YET;
+	
+	if(mpInitializer)
+	{
+		delete mpInitializer;
+		mpInitializer = static_cast<Initializer*>(NULL);
+	}
+	
+	mlRelativeFramePoses.clear();
+	mlpReferences.clear();
+	mlFrameTimes.clear();
+	mlbLost.clear();
+	
+	if(mpViewer)
+		mpViewer->Release();
+}
+
+cv::Mat Tracking::GrabImageMonocular(const cv::Mat &im, const double &timestamp)
+{
+	mIMGray = im;
+	
+	if(mImGray.channels() == 3)
+	{
+		if(mbRGB)
+			cv::cvtColor(mImGray, mImGray, CV_RGB2GRAY);
+		else
+			cv::cvtColor(mImGray, mImGray, CV_BGR2GRAY);
+	}
+	else if(mImGray.channels() == 4)
+	{
+		if(mbRGB)
+			cv::cvtColor(mImGray, mImGray, CV_RGBA2GRAY);
+		else
+			cv::cvtColor(mImGray, mImGray, CV_BGRA2GRAY);
+	}
+	
+	if(mState==NOT_INITIALIZED || mState==NO_IMAGES_YET)
+		mCurrentFrame = Frame(
+				mImGray,
+				timestamp,
+				mpIniORBextractor,
+				mpORBVocabulary,
+				mK,
+				mDistCoef,
+				mbf,
+				mThDepth);
+	else
+		mCurrentFrame = Frame(
+				mImGray,
+				timestamp,
+				mpORBextractorLeft,
+				mpORBVocabulary,
+				mK,
+				mDistCoef,
+				mbf,
+				mThDepth);
+	
+}
+
+void Tracking::InformOnlyTracking(const bool &flag)
+{
+	mbOnlyTracking = flag;
+}
 
 
 } // namespace ORB_SLAM2

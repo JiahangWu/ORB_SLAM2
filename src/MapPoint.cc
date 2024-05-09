@@ -227,6 +227,13 @@ map<KeyFrame*, size_t> MapPoint::GetObservations()
 	return mObservations;
 }
 
+int MapPoint::Observations()
+{
+	unique_lock<mutex> lock(mMutexFeatures);
+	return nObs;
+}
+
+
 void MapPoint::SetBadFlag()
 {
 	map<KeyFrame*, size_t> obs;

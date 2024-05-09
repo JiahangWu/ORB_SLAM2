@@ -193,7 +193,52 @@ void LocalMapping::CreateNewMapPoints()
 		}
 }
 
+void LocalMapping::RequestStop()
+{	unique_lock<mutex> lock(mMutexStop);
+	mbStopRequested = true;
+	unique_lock<mutex> lock2(mMutexNewKFs);
+	mbAbortBA = true;
+}
 
+
+void LocalMapping::RequestReset()
+{
+	{
+		unique_lock<mutex> lock(mMutexReset);
+		mbResetRequested = true;
+	}
+	while(1)
+	{
+		{
+			unique_lock<mutex> lock2(mMutexReset);
+			if(!mbResetRequested)
+				break;
+		}
+		std::this_thread::sleep_for(std::chrono::milliseconds(3));
+	}
+}
+
+
+bool LocalMapping::isStopped()
+{
+	unique_lock<mutex> lock(mMutexStop);
+	return mbStopped;
+}
+
+void LocalMapping::Release()
+{
+	unique_lock<mutex> lock(mMutexStop);
+	unique_lock<mutex> lock2(mMutexFinish);
+	if(mbFinished)
+		return;
+	mbStoped = false;
+	mbStopRequested = false;
+	for(list<KeyFrame*>::iterator lit = mlNewKeyFrames.begin(), lend = mlNewKeyFrames.end(); lit != lend; lit++)
+		delete *lit;
+	mlNewKeyFrames.clear();
+	
+	cout << "Local Mapping RELEASE" << endl;
+}
 
 
 } // namespace ORB_SLAM2
