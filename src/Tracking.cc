@@ -224,7 +224,87 @@ cv::Mat Tracking::GrabImageMonocular(const cv::Mat &im, const double &timestamp)
 				mbf,
 				mThDepth);
 	
+	Track();
+	
+	return mCurrentFrame.mTcw.clone();
 }
+
+
+void Tracking::Track()
+{
+	if(mState == NO_IMAGES_YET)
+	{
+		mState = NOT_INITIALIZED;
+	}
+	
+	mLastProcessedState = mState;
+	
+	unique_lock<mutex> lock(mpMap->mMutexMapUpdate);
+	
+	if(mState == NOT_INITIALIZED)
+	{
+		if(mSensor == System::STEREO || mSensor == System::RGBD)
+			StereoInitialization();
+		else
+			MonocularInitialization();
+		
+	}
+	
+	
+}
+
+void Tracking::StereoInitialization()
+{
+	
+}
+
+void Tracking::MonocularInitialization()
+{
+	if(!mpInitializer)
+	{
+		if(mCurrentFrame.mvKeys.size() > 100)
+		{
+			mInitialFrame = Frame(mCurrentFrame);
+			mLastFrame = Frame(mCurrentFrame);
+			
+			mvbPrevMatched.resize(mCurrentFrame.mvKeysUn.size());
+			for (size_t i = 0; i < mCurrentFrame.mvKeysUn.size(); i++)
+				mvbPrevMatched[i] = mCurrentFrame.mvKeysUn[i].pt;
+			
+			if(mpInitializer)
+				delete mpInitializer;
+			
+			mpInitializer = new Initializer(mCurrentFrame, 1.0, 200);
+			fill(mvIniMatches.begin(), mvIniMatches.end(), -1);
+			
+			return;
+		}
+	}
+	else
+	{
+		if((int)mCurrentFrame.mvKeys.size() <= 100)
+		{
+			delete mpInitializer;
+			mpInitializer = static_cast<Initializer*>(NULL);
+			fill(mvIniMatches.begin(), mvIniMatches.end(), -1);
+			return;
+		}
+		
+		ORBmatcher matcher(0.9, true);
+		
+		int nmatches = matcher.SearchForInitialization(
+			mInitialFrame, mCurrentFrame,
+			mvbPrevMatched,
+			mvIniMatches,
+			100);
+		
+	}
+}
+
+
+
+
+
 
 void Tracking::InformOnlyTracking(const bool &flag)
 {

@@ -20,6 +20,89 @@ const int PATCH_SIZE = 31;
 const int HALF_PATCH_SIZE = 15;
 const int EDGE_THRESHOLD = 19;
 
+static float IC_Angle(const Mat &image, Point2f pt, const vector<int> &u_max)
+{
+	int m_01 = 0, m_10 = 0;
+	const uchar* center = &image.at<uchar>(cvRound(pt.y), cvRound(pt.x));
+	
+	for (int u = -HALF_PATCH_SIZE; u <= HALF_PATCH_SIZE; u++)
+		m_10 += u * center[u];
+
+	// Go line by line in the circular patch  
+	//这里的step1表示这个图像一行包含的字节总数。参考[https://blog.csdn.net/qianqing13579/article/details/45318279]
+	int step = (int)image.step1();
+	//注意这里是以v=0中心线为对称轴，然后对称地每成对的两行之间进行遍历，这样处理加快了计算速度
+	for (int v = 1; v <= HALF_PATCH_SIZE; ++v)
+	{
+		// Proceed over the two lines
+		//本来m_01应该是一列一列地计算的，但是由于对称以及坐标x,y正负的原因，可以一次计算两行
+		int v_sum = 0;
+		// 获取某行像素横坐标的最大范围，注意这里的图像块是圆形的！
+		int d = u_max[v];
+		//在坐标范围内挨个像素遍历，实际是一次遍历2个
+		// 假设每次处理的两个点坐标，中心线下方为(x,y),中心线上方为(x,-y) 
+		// 对于某次待处理的两个点：m_10 = Σ x*I(x,y) =  x*I(x,y) + x*I(x,-y) = x*(I(x,y) + I(x,-y))
+		// 对于某次待处理的两个点：m_01 = Σ y*I(x,y) =  y*I(x,y) - y*I(x,-y) = y*(I(x,y) - I(x,-y))
+		for (int u = -d; u <= d; ++u)
+		{
+			//得到需要进行加运算和减运算的像素灰度值
+			//val_plus：在中心线下方x=u时的的像素灰度值
+			//val_minus：在中心线上方x=u时的像素灰度值
+			int val_plus = center[u + v*step], val_minus = center[u - v*step];
+			//在v（y轴）上，2行所有像素灰度值之差
+			v_sum += (val_plus - val_minus);
+			//u轴（也就是x轴）方向上用u坐标加权和（u坐标也有正负符号），相当于同时计算两行
+			m_10 += u * (val_plus + val_minus);
+		}
+		//将这一行上的和按照y坐标加权
+		m_01 += v * v_sum;
+	}
+
+	//为了加快速度还使用了fastAtan2()函数，输出为[0,360)角度，精度为0.3°
+	return fastAtan2((float)m_01, (float)m_10);
+}
+
+const float factorPI = (float)(CV_PI / 180.f);
+
+static void computeOrbDescriptor(const KeyPoint &kpt, const Mat &img, const Point *pattern, uchar *desc)
+{
+	float angle = (float)kpt.angle * factorPI;
+	float a = (float)cos(angle), b = (float)sin(angle);
+	
+	const uchar *center = &img.at<uchar>(cvRound(kpt.pt.y), cvRound(kpt.pt.x));
+	const int step = (int)img.step;
+	
+	#define GET_VALUE(idx) center[cvRound(pattern[idx].x * b + pattern[idx].y * a) * step + cvRound(pattern[idx].x * a - pattern[idx].y * b)];
+	
+	for (int i = 0; i < 32; i++, pattern += 16)
+	{
+		int t0, t1, val;
+		
+		t0 = GET_VALUE(0); t1 = GET_VALUE(1);
+		val = t0 < t1;
+		t0 = GET_VALUE(2); t1 = GET_VALUE(3);
+		val |= (t0 < t1) << 1;
+		t0 = GET_VALUE(4); t1 = GET_VALUE(5);
+		val |= (t0 < t1) << 2;
+		t0 = GET_VALUE(6); t1 = GET_VALUE(7);
+		val |= (t0 < t1) << 3;
+		t0 = GET_VALUE(8); t1 = GET_VALUE(9);
+		val |= (t0 < t1) << 4;
+		t0 = GET_VALUE(10); t1 = GET_VALUE(11);
+		val |= (t0 < t1) << 5;
+		t0 = GET_VALUE(12); t1 = GET_VALUE(13);
+		val |= (t0 < t1) << 6;
+		t0 = GET_VALUE(14); t1 = GET_VALUE(15);
+		val |= (t0 < t1) << 7;
+		
+		desc[i] = (uchar)val;
+	}
+	
+	#undef GET_VAULE
+	
+}
+
+
 
 //下面就是预先定义好的随机点集，256是指可以提取出256bit的描述子信息，每个bit由一对点比较得来；4=2*2，前面的2是需要两个点（一对点）进行比较，后面的2是一个点有两个坐标
 static int bit_pattern_31_[256*4] =
@@ -352,6 +435,16 @@ ORBextractor::ORBextractor(int _nfeatures,
 		}
 }
 
+static void computeOrientation(const Mat &image, vector<KeyPoint> &keypoints, const vector<int> &umax)
+{
+	for(vector<KeyPoint>::iterator keypoint = keypoints.begin(),
+		keypointEnd = keypoints.end(); keypoint != keypointEnd; ++keypoint)
+	{
+		keypoint->angle = IC_Angle(image, keypoint->pt, umax);
+	}
+}
+
+
 void ORBextractor::operator()(cv::InputArray _image, cv::InputArray _mask, vector<KeyPoint> & _keypoints, 
 	cv::OutputArray _descriptors)
 {
@@ -365,6 +458,50 @@ void ORBextractor::operator()(cv::InputArray _image, cv::InputArray _mask, vecto
 	vector<vector<KeyPoint>> allKeypoints;
 	
 	ComputeKeyPointsOctTree(allKeypoints);
+	
+	Mat descriptors;
+	
+	int nkeypoints = 0;
+	for (int level = 0; level < nlevels; level++)
+		nkeypoints += (int)allKeypoints[level].size();
+	
+	if(nkeypoints == 0)
+		_descriptors.release();
+	else
+	{
+		_descriptors.create(nkeypoints,
+							32,
+							CV_8U);
+		descriptors = _descriptors.getMat();
+	}
+	
+	_keypoints.clear();
+	_keypoints.reserve(nkeypoints);
+	
+	int offset = 0;
+	
+	for (int level = 0; level < nlevels; level++)
+	{
+		vector<KeyPoint> &keypoints = allKeypoints[level];
+		int nkeypointsLevel = (int)keypoints.size();
+		
+		if(nkeypointsLevel == 0)
+			continue;
+		
+		Mat workingMat = mvImagePyramid[level].clone();
+		
+		GaussianBlur(workingMat, workingMat, Size(7, 7), 2, 2, BORDER_REFLECT101);
+		
+		Mat desc = descriptors.rowRange(offset, offset + nkeypointsLevel);
+		
+		computeDescriptors(workingMat, keypoints, desc, pattern);
+		
+	}
+	
+	
+	
+	
+	
 	
 	
 	
@@ -432,7 +569,7 @@ void ExtractorNode::DivideNode(ExtractorNode &n1,
 }
 
 vector<cv::KeyPoint> ORBextractor::DistributeOctTree(const std::vector<cv::KeyPoint> &vToDistributeKeys, const int &minX, const int &maxX, 
-										const int &minY, const int &maxY, const int &nFeatures, const int &N, const int &level)
+										const int &minY, const int &maxY, const int &nFeatures, const int &level)
 {
 	const int nIni = round(static_cast<float>(maxX-minX)/(maxY-minY));
 	
@@ -562,13 +699,100 @@ vector<cv::KeyPoint> ORBextractor::DistributeOctTree(const std::vector<cv::KeyPo
 		{
 			bFinish = true;
 		}
-		
-		
+		else if(((int)lNodes.size() + nToExpand * 3) > N)
+		{
+			while(!bFinish)
+			{
+				prevSize = lNodes.size();
+				
+				vector<pair<int, ExtractorNode*>> vPrevSizeAndPointerToNode = vSizeAndPointerToNode;
+				vSizeAndPointerToNode.clear();
+				
+				sort(vPrevSizeAndPointerToNode.begin(), vPrevSizeAndPointerToNode.end());
+				
+				for (int j = vPrevSizeAndPointerToNode.size()-1; j >= 0; j--)
+				{
+					ExtractorNode n1, n2, n3, n4;
+					vPrevSizeAndPointerToNode[j].second->DivideNode(n1, n2, n3, n4);
+					
+					if(n1.vKeys.size() > 0)
+					{
+						lNodes.push_front(n1);
+						
+						if(n1.vKeys.size() > 1)
+						{
+							nToExpand++;
+							vSizeAndPointerToNode.push_back(make_pair(n1.vKeys.size(), &lNodes.front()));
+							lNodes.front().lit = lNodes.begin();
+						}
+					}
+					if(n2.vKeys.size() > 0)
+					{
+						lNodes.push_back(n2);
+						if(n2.vKeys.size() > 1)
+						{
+							nToExpand++;
+							vSizeAndPointerToNode.push_back(make_pair(n2.vKeys.size(), &lNodes.front()));
+							lNodes.front().lit = lNodes.begin();
+						}
+					}
+					if(n3.vKeys.size() > 0)
+					{
+						lNodes.push_back(n3);
+						if(n3.vKeys.size() > 1)
+						{
+							nToExpand++;
+							vSizeAndPointerToNode.push_back(make_pair(n3.vKeys.size(), &lNodes.front()));
+							lNodes.front().lit = lNodes.begin();
+						}
+					}
+					
+					if(n4.vKeys.size() > 0)
+					{
+						lNodes.push_back(n4);
+						if(n4.vKeys.size() > 1)
+						{
+							nToExpand++;
+							vSizeAndPointerToNode.push_back(make_pair(n4.vKeys.size(), &lNodes.front()));
+							lNodes.front().lit = lNodes.begin();
+						}
+					}
+					
+					lNodes.erase(vPrevSizeAndPointerToNode[j].second->lit);
+					
+					if((int)lNodes.size() >= N)
+						break;
+				}
+				
+				if((int)lNodes.size() >= N || (int)lNodes.size() == prevSize)
+					bFinish = true;
+			}
+		}
 	}
 	
+	vector<cv::KeyPoint> vResultKeys;
 	
+	vResultKeys.reserve(nfeatures);
 	
+	for(list<ExtractorNode>::iterator lit = lNodes.begin(); lit != lNodes.end(); lit++)
+	{
+		vector<cv::KeyPoint> &vNodeKeys = lit->vKeys;
+		cv::KeyPoint *pKP = &vNodeKeys[0];
+		
+		float maxResponse = pKP->response;
+		
+		for (size_t k = 1; k < vNodeKeys.size(); k++)
+		{
+			if(vNodeKeys[k].response > maxResponse)
+			{
+				pKP = &vNodeKeys[k];
+				maxResponse = vNodeKeys[k].response;
+			}
+		}
+		vResultKeys.push_back(*pKP);
+	}
 	
+	return vResultKeys;
 }
 
 
@@ -654,11 +878,33 @@ void ORBextractor::ComputeKeyPointsOctTree(
 									  mnFeaturesPerLevel[level],
 									  level);
 		
-	
-	
+		const int scaledPatchSize = PATCH_SIZE * mvScaleFactor[level];
+		const int nkps = keypoints.size();
+		for (int i = 0; i < nkps; i++)
+		{
+			keypoints[i].pt.x += minBorderX;
+			keypoints[i].pt.y += minBorderY;
+			keypoints[i].octave = level;
+			keypoints[i].size = scaledPatchSize;
+		}
 	}
 	
+	for (int level = 0; level < nlevels; level++)
+	{
+		computeOrientation(mvImagePyramid[level],
+						   allKeypoints[level],
+						   umax);
+	}
+}
+
+static void computeDescriptors(const Mat &image, vector<KeyPoint> &keypoints, Mat &descriptors,
+							   const vector<Point> &pattern)
+{
+	descriptors = Mat::zeros((int)keypoints.size(), 32, CV_8UC1);
 	
+	for (size_t i = 0; i < keypoints.size(); i++)
+		computeOrbDescriptor(keypoints[i], image, &pattern[0], descriptors.ptr(int)i);
+
 	
 	
 }
