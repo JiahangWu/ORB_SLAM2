@@ -298,6 +298,18 @@ void Tracking::MonocularInitialization()
 			mvIniMatches,
 			100);
 		
+		if(nmatches < 100)
+		{
+			delete mpInitializer;
+			mpInitializer = static_cast<Initializer*>(NULL);
+			return;
+		}
+		
+		cv::Mat Rcw;
+		cv::Mat tcw;
+		vector<bool> vbTriangulated;
+		
+		if(mpInitializer->Initialize(mCurrentFrame, mvIniMatches, Rcw, tcw, vbTriangulated))
 	}
 }
 
