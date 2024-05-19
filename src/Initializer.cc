@@ -83,7 +83,8 @@ bool Initializer::Initialize(const Frame &CurrentFrame, const vector<int> &vMatc
 	
 	float(Rh > 0.4)
 		return ReconstructH(vbMatchesInliersH, H, mK, R21, t21, vP3D, vbTriangulated, 1.0, 50);
-	
+	else
+		return ReconstructF(vbMatchesInliersF, F, mK, R21, t21, vP3D, vbTriangulated, 1.0, 50);
 	
 	
 }
@@ -452,10 +453,241 @@ float Initializer::CheckFundamental(const cv::Mat &F21, vector<bool> &vbMatchesI
 	return score;
 }
 
-bool Initializer::ReconstructH(vector<bool> & vbMatchesInliers, cv::Mat &H21, cv::Mat &K,
+bool Initializer::ReconstructH(vector<bool> &vbMatchesInliers, cv::Mat &H21, cv::Mat &K,
+                      cv::Mat &R21, cv::Mat &t21, vector<cv::Point3f> &vP3D, vector<bool> &vbTriangulated, float minParallax, int minTriangulated)
+{
+
+    // 目的 ：通过单应矩阵H恢复两帧图像之间的旋转矩阵R和平移向量T
+    // 参考 ：Motion and structure from motion in a piecewise plannar environment.
+    //        International Journal of Pattern Recognition and Artificial Intelligence, 1988
+    // https://www.researchgate.net/publication/243764888_Motion_and_Structure_from_Motion_in_a_Piecewise_Planar_Environment
+    
+    // 流程:
+    //      1. 根据H矩阵的奇异值d'= d2 或者 d' = -d2 分别计算 H 矩阵分解的 8 组解
+    //        1.1 讨论 d' > 0 时的 4 组解
+    //        1.2 讨论 d' < 0 时的 4 组解
+    //      2. 对 8 组解进行验证，并选择产生相机前方最多3D点的解为最优解
+
+    // 统计匹配的特征点对中属于内点(Inlier)或有效点个数
+    int N=0;
+    for(size_t i=0, iend = vbMatchesInliers.size() ; i<iend; i++)
+        if(vbMatchesInliers[i])
+            N++;
+
+    // We recover 8 motion hypotheses using the method of Faugeras et al.
+    // Motion and structure from motion in a piecewise planar environment.
+    // International Journal of Pattern Recognition and Artificial Intelligence, 1988
+
+    // 参考SLAM十四讲第二版p170-p171
+    // H = K * (R - t * n / d) * K_inv
+    // 其中: K表示内参数矩阵
+    //       K_inv 表示内参数矩阵的逆
+    //       R 和 t 表示旋转和平移向量
+    //       n 表示平面法向量
+    // 令 H = K * A * K_inv
+    // 则 A = k_inv * H * k
+
+    cv::Mat invK = K.inv();
+    cv::Mat A = invK*H21*K;
+
+    // 对矩阵A进行SVD分解
+    // A 等待被进行奇异值分解的矩阵
+    // w 奇异值矩阵
+    // U 奇异值分解左矩阵
+    // Vt 奇异值分解右矩阵，注意函数返回的是转置
+    // cv::SVD::FULL_UV 全部分解
+    // A = U * w * Vt
+    cv::Mat U,w,Vt,V;
+    cv::SVD::compute(A, w, U, Vt, cv::SVD::FULL_UV);
+
+    // 根据文献eq(8)，计算关联变量
+    V=Vt.t();
+
+    // 计算变量s = det(U) * det(V)
+    // 因为det(V)==det(Vt), 所以 s = det(U) * det(Vt)
+    float s = cv::determinant(U)*cv::determinant(Vt);
+    
+    // 取得矩阵的各个奇异值
+    float d1 = w.at<float>(0);
+    float d2 = w.at<float>(1);
+    float d3 = w.at<float>(2);
+
+    // SVD分解正常情况下特征值di应该是正的，且满足d1>=d2>=d3
+    if(d1/d2<1.00001 || d2/d3<1.00001) {
+        return false;
+    }
+
+
+    // 在ORBSLAM中没有对奇异值 d1 d2 d3按照论文中描述的关系进行分类讨论, 而是直接进行了计算
+    // 定义8中情况下的旋转矩阵、平移向量和空间向量
+    vector<cv::Mat> vR, vt, vn;
+    vR.reserve(8);
+    vt.reserve(8);
+    vn.reserve(8);
+
+    // Step 1.1 讨论 d' > 0 时的 4 组解
+    // 根据论文eq.(12)有
+    // x1 = e1 * sqrt((d1 * d1 - d2 * d2) / (d1 * d1 - d3 * d3))
+    // x2 = 0
+    // x3 = e3 * sqrt((d2 * d2 - d2 * d2) / (d1 * d1 - d3 * d3))
+    // 令 aux1 = sqrt((d1*d1-d2*d2)/(d1*d1-d3*d3))
+    //    aux3 = sqrt((d2*d2-d3*d3)/(d1*d1-d3*d3))
+    // 则
+    // x1 = e1 * aux1
+    // x3 = e3 * aux2
+
+    // 因为 e1,e2,e3 = 1 or -1
+    // 所以有x1和x3有四种组合
+    // x1 =  {aux1,aux1,-aux1,-aux1}
+    // x3 =  {aux3,-aux3,aux3,-aux3}
+
+    float aux1 = sqrt((d1*d1-d2*d2)/(d1*d1-d3*d3));
+    float aux3 = sqrt((d2*d2-d3*d3)/(d1*d1-d3*d3));
+    float x1[] = {aux1,aux1,-aux1,-aux1};
+    float x3[] = {aux3,-aux3,aux3,-aux3};
+
+
+    // 根据论文eq.(13)有
+    // sin(theta) = e1 * e3 * sqrt(( d1 * d1 - d2 * d2) * (d2 * d2 - d3 * d3)) /(d1 + d3)/d2
+    // cos(theta) = (d2* d2 + d1 * d3) / (d1 + d3) / d2 
+    // 令  aux_stheta = sqrt((d1*d1-d2*d2)*(d2*d2-d3*d3))/((d1+d3)*d2)
+    // 则  sin(theta) = e1 * e3 * aux_stheta
+    //     cos(theta) = (d2*d2+d1*d3)/((d1+d3)*d2)
+    // 因为 e1 e2 e3 = 1 or -1
+    // 所以 sin(theta) = {aux_stheta, -aux_stheta, -aux_stheta, aux_stheta}
+    float aux_stheta = sqrt((d1*d1-d2*d2)*(d2*d2-d3*d3))/((d1+d3)*d2);
+    float ctheta = (d2*d2+d1*d3)/((d1+d3)*d2);
+    float stheta[] = {aux_stheta, -aux_stheta, -aux_stheta, aux_stheta};
+	
+	for (int i = 0; i < 4; i++)
+	{
+		cv::Mat Rp = cv::Mat::eye(3, 3, CV_32F);
+		Rp.at<float>(0, 0) = ctheta;
+		Rp.at<float>(0, 2) = -stheta[i];
+		Rp.at<float>(2, 0) = stheta[i];
+		Rp.at<float>(2, 2) = ctheta;
+		
+		cv::Mat R = s * U * Rp *Vt;
+		
+		vR.push_back(R);
+		
+		cv::Mat tp(3, 1, CV_32F);
+		tp.at<float>(0) = x1[i];
+		tp.at<float>(1) = 0;
+		tp.at<float>(2) = -x3[i];
+		tp *= d1 - d3;
+		
+		cv::Mat t = U * tp;
+		vt.push_back(t / cv::norm(t));
+		
+		cv::Mat np(3, 1, CV_32F);
+		np.at<float>(0) = x1[i];
+		np.at<float>(1) = 0;
+		np.at<float>(2) = x3[i];
+		
+		cv::Mat n = V * np;
+		if(n.at<float>(2) < 0)
+			n = -n;
+		vn.push_back(n);
+	}
+	
+	float aux_sphi = sqrt((d1 * d1 - d2 * d2) * (d2 * d2 - d3 * d3)) / ((d1 - d3) * d2);
+	float cphi = sqrt(d1 * d3 - d2 * d2) / ((d1 - d3) * d2);
+	float sphi[] = {aux_sphi, -aux_sphi, -aux_sphi, aux_sphi};
+	
+	for (int i = 0; i < 4; i++)
+	{
+		cv::Mat Rp = cv::Mat::eye(3, 3, CV_32F);
+		Rp.at<float>(0, 0) = cphi;
+		Rp.at<float>(0, 2) = sphi[i];
+		Rp.at<float>(1, 1) = -1;
+		Rp.at<float>(1, 1) = sphi[i];
+		Rp.at<float>(2, 2) = -cphi;
+		
+		cv::Mat R = s * U * Rp *Vt;
+		vR.push_back(R);
+		
+		cv::Mat tp(3, 1, CV_32F);
+		tp.at<float>(0)=x1[i];
+		tp.at<float>(1)=0;
+		tp.at<float>(2)=x3[i];
+		tp*=d1+d3;
+
+		// 恢复出原来的t
+		cv::Mat t = U*tp;
+		// 归一化之后加入到vector中,要提供给上面的平移矩阵都是要进行过归一化的
+		vt.push_back(t/cv::norm(t));
+
+		// 构造法向量np
+		cv::Mat np(3,1,CV_32F);
+		np.at<float>(0)=x1[i];
+		np.at<float>(1)=0;
+		np.at<float>(2)=x3[i];
+
+		// 恢复出原来的法向量
+		cv::Mat n = V*np;
+		// 保证法向量指向上方
+		if(n.at<float>(2)<0)
+			n=-n;
+		// 添加到vector中
+		vn.push_back(n);
+		
+	}
+	
+	// 最好的good点
+	int bestGood = 0;
+	// 其次最好的good点
+	int secondBestGood = 0;    
+	// 最好的解的索引，初始值为-1
+	int bestSolutionIdx = -1;
+	// 最大的视差角
+	float bestParallax = -1;
+	// 存储最好解对应的，对特征点对进行三角化测量的结果
+	vector<cv::Point3f> bestP3D;
+	// 最佳解所对应的，那些可以被三角化测量的点的标记
+	vector<bool> bestTriangulated;
+	
+	for (size_t i = 0; i < 8; i++)
+	{
+		float parallaxi;
+		vector<cv::Point3f> vP3D;
+		vector<bool> vbTriangulatedi;
+		
+	}
+	
+	
+	
+}
+
+
+
+bool Initializer::ReconstructF(vector<bool> & vbMatchesInliers, cv::Mat &F21, cv::Mat &K,
 							   cv::Mat &R21, cv::Mat &t21, vector<cv::Point3f> &vP3D, vector<bool> &vbTriangulated,
 							   float minParallax, int minTriangulated)
 {
+	
+}
+
+
+
+int CheckRT(const cv::Mat &R, const cv::Mat &t, const vector<cv::KeyPoint> &vKeys1, const vector<cv::KeyPoint> &vKeys2,
+			const vector<Match> &vMatches12, vector<bool> &vbInliers,
+			const cv::Mat &K, vector<cv::Point3f> &vP3D, float th2, vector<bool> &vbGood, float &parallax)
+{
+	const float fx = K.at<float>(0, 0);
+	const float fy = K.at<float>(1, 1);
+	const float cx = K.at<float>(0, 2);
+	const float cy = K.at<float>(1, 2);
+	
+	vbGood = vector<bool>(vKeys1.size(), false);
+	vP3D.resize(vKeys1.size());
+	vector<float> vCosParallax;
+	vCosParallax.reserve(vKeys1.size());
+	
+	cv::Mat P1(3, 4, CV_32F, cv::Scalar(0));
+	
+	K.copyTo(P1.rowRange(0, 3).colRange(0, 3));
+	cv::Mat O1 = cv::Mat::zeros(3, 1, CV_32F);
 	
 }
 
