@@ -81,12 +81,12 @@ bool Initializer::Initialize(const Frame &CurrentFrame, const vector<int> &vMatc
 	threadH.join();
 	threadF.join();
 	
-	float(Rh > 0.4)
+	if(Rh > 0.4)
 		return ReconstructH(vbMatchesInliersH, H, mK, R21, t21, vP3D, vbTriangulated, 1.0, 50);
 	else
 		return ReconstructF(vbMatchesInliersF, F, mK, R21, t21, vP3D, vbTriangulated, 1.0, 50);
 	
-	
+	return false;
 }
 
 void Initializer::FindHomography(vector<bool> &vbMatchesInliers, float &score, cv::Mat &H21)
@@ -653,10 +653,37 @@ bool Initializer::ReconstructH(vector<bool> &vbMatchesInliers, cv::Mat &H21, cv:
 		vector<cv::Point3f> vP3D;
 		vector<bool> vbTriangulatedi;
 		
+		int nGood = CheckRT(vR[i], vt[i], mvKeys1, mvKeys2, mvMatches12, vbMatchesInliers,
+							K, vP3Di, 4.0 * mSigma2, vbTriangulatedi, parallaxi);
+		
+		if(nGood > bestGood)
+		{
+			secondBestGood = bestGood;
+			bestGood = nGood;
+			bestSolutionIdx = i;
+			bestParallax = parallaxi;
+			bestP3D = vP3Di;
+			bestTriangulated = vbTriangulatedi;
+		}
+		else if(nGood > secondBestGood)
+			secondBestGood = nGood;
 	}
 	
 	
-	
+	if(secondBestGood << 0.75 * bestGood &&
+	   bestParallax >= minParallax &&
+	   bestGood > minTriangulated &&
+	   bestGood > 0.9 * N)
+	{
+		vR[bestSolutionIdx].copyTo(R21);
+		vt[bestSolutionIdx].copyTo(t21);
+		vP3D = bestP3D;
+		vbTriangulated = bestTriangulated;
+		
+		return true;
+	}
+	return false;
+
 }
 
 
@@ -665,7 +692,151 @@ bool Initializer::ReconstructF(vector<bool> & vbMatchesInliers, cv::Mat &F21, cv
 							   cv::Mat &R21, cv::Mat &t21, vector<cv::Point3f> &vP3D, vector<bool> &vbTriangulated,
 							   float minParallax, int minTriangulated)
 {
-	
+	// Step 1 统计有效匹配点个数，并用 N 表示
+	// vbMatchesInliers 中存储匹配点对是否是有效
+	int N=0;
+	for(size_t i=0, iend = vbMatchesInliers.size() ; i<iend; i++)
+		if(vbMatchesInliers[i]) N++;
+
+	// Step 2 根据基础矩阵和相机的内参数矩阵计算本质矩阵
+	cv::Mat E21 = K.t()*F21*K;
+
+	// 定义本质矩阵分解结果，形成四组解,分别是：
+	// (R1, t) (R1, -t) (R2, t) (R2, -t)
+	cv::Mat R1, R2, t;
+
+	// Step 3 从本质矩阵求解两个R解和两个t解，共四组解
+	// 不过由于两个t解互为相反数，因此这里先只获取一个
+	// 虽然这个函数对t有归一化，但并没有决定单目整个SLAM过程的尺度. 
+	// 因为 CreateInitialMapMonocular 函数对3D点深度会缩放，然后反过来对 t 有改变.
+	//注意下文中的符号“'”表示矩阵的转置
+	//                          |0 -1  0|
+	// E = U Sigma V'   let W = |1  0  0|
+	//                          |0  0  1|
+	// 得到4个解 E = [R|t]
+	// R1 = UWV' R2 = UW'V' t1 = U3 t2 = -U3
+	DecomposeE(E21,R1,R2,t);  
+	cv::Mat t1=t;
+	cv::Mat t2=-t;
+
+	// Reconstruct with the 4 hyphoteses and check
+	// Step 4 分别验证求解的4种R和t的组合，选出最佳组合
+	// 原理：若某一组合使恢复得到的3D点位于相机正前方的数量最多，那么该组合就是最佳组合
+	// 实现：根据计算的解组合成为四种情况,并依次调用 Initializer::CheckRT() 进行检查,得到可以进行三角化测量的点的数目
+	// 定义四组解分别在对同一匹配点集进行三角化测量之后的特征点空间坐标
+	vector<cv::Point3f> vP3D1, vP3D2, vP3D3, vP3D4;
+
+	// 定义四组解分别对同一匹配点集的有效三角化结果，True or False
+	vector<bool> vbTriangulated1,vbTriangulated2,vbTriangulated3, vbTriangulated4;
+
+	// 定义四种解对应的比较大的特征点对视差角
+	float parallax1,parallax2, parallax3, parallax4;
+
+	// Step 4.1 使用同样的匹配点分别检查四组解，记录当前计算的3D点在摄像头前方且投影误差小于阈值的个数，记为有效3D点个数
+	int nGood1 = CheckRT(R1,t1,							//当前组解
+						mvKeys1,mvKeys2,				//参考帧和当前帧中的特征点
+						mvMatches12, vbMatchesInliers,	//特征点的匹配关系和Inliers标记
+						K, 							//相机的内参数矩阵
+						vP3D1,							//存储三角化以后特征点的空间坐标
+						4.0*mSigma2,					//三角化测量过程中允许的最大重投影误差
+						vbTriangulated1,				//参考帧中被成功进行三角化测量的特征点的标记
+						parallax1);					//认为某对特征点三角化测量有效的比较大的视差角
+	int nGood2 = CheckRT(R2,t1,mvKeys1,mvKeys2,mvMatches12,vbMatchesInliers,K, vP3D2, 4.0*mSigma2, vbTriangulated2, parallax2);
+	int nGood3 = CheckRT(R1,t2,mvKeys1,mvKeys2,mvMatches12,vbMatchesInliers,K, vP3D3, 4.0*mSigma2, vbTriangulated3, parallax3);
+	int nGood4 = CheckRT(R2,t2,mvKeys1,mvKeys2,mvMatches12,vbMatchesInliers,K, vP3D4, 4.0*mSigma2, vbTriangulated4, parallax4);
+
+	// Step 4.2 选取最大可三角化测量的点的数目
+	int maxGood = max(nGood1,max(nGood2,max(nGood3,nGood4)));
+
+	// 重置变量，并在后面赋值为最佳R和T
+	R21 = cv::Mat();
+	t21 = cv::Mat();
+
+	// Step 4.3 确定最小的可以三角化的点数 
+	// 在0.9倍的内点数 和 指定值minTriangulated =50 中取最大的，也就是说至少50个
+	int nMinGood = max(static_cast<int>(0.9*N), minTriangulated);
+
+	// 统计四组解中重建的有效3D点个数 > 0.7 * maxGood 的解的数目
+	// 如果有多个解同时满足该条件，认为结果太接近，nsimilar++，nsimilar>1就认为有问题了，后面返回false
+	int nsimilar = 0;
+	if(nGood1>0.7*maxGood)
+		nsimilar++;
+	if(nGood2>0.7*maxGood)
+		nsimilar++;
+	if(nGood3>0.7*maxGood)
+		nsimilar++;
+	if(nGood4>0.7*maxGood)
+		nsimilar++;
+
+	// Step 4.4 四个结果中如果没有明显的最优结果，或者没有足够数量的三角化点，则返回失败
+	// 条件1: 如果四组解能够重建的最多3D点个数小于所要求的最少3D点个数（mMinGood），失败
+	// 条件2: 如果存在两组及以上的解能三角化出 >0.7*maxGood的点，说明没有明显最优结果，失败
+	if(maxGood<nMinGood || nsimilar>1)	
+	{
+		return false;
+	}
+
+
+	//  Step 4.5 选择最佳解记录结果
+	// 条件1: 有效重建最多的3D点，即maxGood == nGoodx，也即是位于相机前方的3D点个数最多
+	// 条件2: 三角化视差角 parallax 必须大于最小视差角 minParallax，角度越大3D点越稳定
+
+	//看看最好的good点是在哪种解的条件下发生的
+	if(maxGood==nGood1)
+	{
+		//如果该种解下的parallax大于函数参数中给定的最小值
+		if(parallax1>minParallax)
+		{
+			// 存储3D坐标
+			vP3D = vP3D1;
+
+			// 获取特征点向量的三角化测量标记
+			vbTriangulated = vbTriangulated1;
+
+			// 存储相机姿态
+			R1.copyTo(R21);
+			t1.copyTo(t21);
+			
+			// 结束
+			return true;
+		}
+	}else if(maxGood==nGood2)
+	{
+		if(parallax2>minParallax)
+		{
+			vP3D = vP3D2;
+			vbTriangulated = vbTriangulated2;
+
+			R2.copyTo(R21);
+			t1.copyTo(t21);
+			return true;
+		}
+	}else if(maxGood==nGood3)
+	{
+		if(parallax3>minParallax)
+		{
+			vP3D = vP3D3;
+			vbTriangulated = vbTriangulated3;
+
+			R1.copyTo(R21);
+			t2.copyTo(t21);
+			return true;
+		}
+	}else if(maxGood==nGood4)
+	{
+		if(parallax4>minParallax)
+		{
+			vP3D = vP3D4;
+			vbTriangulated = vbTriangulated4;
+
+			R2.copyTo(R21);
+			t2.copyTo(t21);
+			return true;
+		}
+	}
+
+	// 如果有最优解但是不满足对应的parallax>minParallax，那么返回false表示求解失败
+	return false;
 }
 
 
@@ -689,7 +860,108 @@ int CheckRT(const cv::Mat &R, const cv::Mat &t, const vector<cv::KeyPoint> &vKey
 	K.copyTo(P1.rowRange(0, 3).colRange(0, 3));
 	cv::Mat O1 = cv::Mat::zeros(3, 1, CV_32F);
 	
+	cv::Mat P2(3, 4, CV_32F);
+	R.copyTo(P2.rowRange(0, 3).colRange(0, 3));
+	t.copyTo(P2.rowRange(0, 3).col(3));
+	
+	P2 = K * P2;
+	cv::Mat O2 = -R.t()*t;
+	
+	int nGood = 0;
+	
+	for (size_t i = 0, iend = vMatches12.size(); i < iend; i++)
+	{
+		if(!vbMatchesInliers[i])
+			continue;
+		
+		const cv::KeyPoint &kp1 = vKeys1[vMatches12[i].first];
+		const cv::KeyPoint &kp2 = vKeys2[vMatches12[i].second];
+		
+		cv::Mat p3dC1;
+		Triangulate(kp1, kp2, P1, P2, p3dC1);
+		
+		if(!isfinite(p3dC1.at<float>(0)) || !isfinite(p3dC1.at<float>(1)) || !isfinite(p3dC1.at<float>(2)));
+		{
+			vbGood[vMatches12[i].first] = false;
+			continue;
+		}
+		
+		cv::Mat normal1 = p3dC1 - O1;
+		float dist1 = cv::norm(normal1);
+		
+		cv::Mat normal2 = p3dC1 - O2;
+		float dist2 = cv::norm(normal2);
+		
+		float cosParallax = normal1.dot(normal2) / (dist1 * dist2);
+		
+		if(p3dC1.at<float>(2) <= 0 && cosParallax < 0.99998)
+			continue;
+		
+		cv::Mat p3dC2 = R * p3dC1 + t;
+		if(p3dC2.at<float>(2) <= 0 && cosParallax < 0.99998)
+			continue;
+			
+		float im1x, im1y;
+		float invZ1 = 1.0 / p3dC1.at<float>(2);
+		
+		im1x = fx * p3dC1.at<float>(0) * invZ1 + cx;
+		im1y = fy * p3dC1.at<float>(1) * invZ1 + cy;
+		
+		
+		float squareError1 = (im1x - kp1.pt.x) * (im1x - kp1.pt.x) + (im1y - kp1.pt.y) * (im1y - kp1.pt.y);
+		if(squareError1 > th2)
+			continue;
+		
+		float im2x, im2y;
+		float invZ2 = 1.0 . p3dC2.at<float>(2);
+		im2x = fx * p3dC2.at<float>(0) * invZ2 + cx;
+		im2y = fy * p3dC2.at<float>(1) * invZ2 + cy;
+		
+		float squareError2 = (im2x - kp2.pt.x) * (im2x - kp2.pt.x) + (im2y - kp2.pt.y) * (im2y - kp2.pt.y);
+		if(squareError2 > th2)
+			continue;
+		
+		vCosParallax.push_back(cosParallax);
+		cP3D[vMatches12[i].first] = cv::Point3f(p3dC1.at<float>(0), p3dC1.at<float>(1), p3dC1.at<float>(2));
+		nGood++;
+		
+		if(cosParallax < 0.9998)
+			vbGood[vMatches12[i].first] = true;
+	}
+	
+	if(nGood > 0)
+	{
+		sort(vCosParallax.begin(), vCosParallax.end());
+		
+		size_t idx = min(50, int(vCosParallax.size() - 1));
+		
+		parallax = acos(vCosParallax[idx]) * 180 / CV_PI;
+	}
+	else
+		parallax = 0;
+		
+	return nGood;
 }
+
+void Initializer::Triangulate(const cv::KeyPoint &kp1, const cv::KeyPoint &kp2, const cv::Mat &P1, const cv::Mat &P2, cv::Mat &x3D)
+{
+	
+	cv::Mat A(4, 4, CV_32F);
+	
+	A.row(0) = kp1.pt.x * P1.row(2) - P1.row(0);
+	A.row(1) = kp1.pt.y * P1.row(2) - P1.row(1);
+	A.row(2) = kp2.pt.x * P2.row(2) - P2.row(0);
+	A.row(3) = kp2.pt.y * P2.row(2) - P2.row(0);
+	
+	cv::Mat u, w, vt;
+	cv::SVD::compute(A, w, u, vt, cv::SVD::MODIFY_A | cv::SVD::FULL_UV);
+	
+	x3D = vt.row(3).t();
+	x3D = x3D.rowRange(0, 3) / x3D.at<float>(3);
+	
+}
+
+
 
 
 void Initializer::Normalize(const vector<cv::KeyPoint> &vKeys, vector<cv::Point2f> &vNormalizedPoints, cv::Mat &T)
@@ -740,5 +1012,38 @@ void Initializer::Normalize(const vector<cv::KeyPoint> &vKeys, vector<cv::Point2
 	T.at<float>(1, 2) = -meanY * sY;
 }
 
+void Initializer::DecomposeE(const cv::Mat &E, cv::Mat &R1, cv::Mat &R2, cv::Mat &t)
+{
+
+	// 对本质矩阵进行奇异值分解
+	//准备存储对本质矩阵进行奇异值分解的结果
+	cv::Mat u,w,vt;
+	//对本质矩阵进行奇异值分解
+	cv::SVD::compute(E,w,u,vt);
+
+	// 左奇异值矩阵U的最后一列就是t，对其进行归一化
+	u.col(2).copyTo(t);
+	t=t/cv::norm(t);
+
+	// 构造一个绕Z轴旋转pi/2的旋转矩阵W，按照下式组合得到旋转矩阵 R1 = u*W*vt
+	//计算完成后要检查一下旋转矩阵行列式的数值，使其满足行列式为1的约束
+	cv::Mat W(3,3,CV_32F,cv::Scalar(0));
+	W.at<float>(0,1)=-1;
+	W.at<float>(1,0)=1;
+	W.at<float>(2,2)=1;
+
+	//计算
+	R1 = u*W*vt;
+	//旋转矩阵有行列式为+1的约束，所以如果算出来为负值，需要取反
+	if(cv::determinant(R1)<0) 
+		R1=-R1;
+
+	// 同理将矩阵W取转置来按照相同的公式计算旋转矩阵R2 = u*W.t()*vt
+
+	R2 = u*W.t()*vt;
+	//旋转矩阵有行列式为1的约束
+	if(cv::determinant(R2)<0)
+		R2=-R2;
+}
 	
 } // namespace ORB_SLAM2

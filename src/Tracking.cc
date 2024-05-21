@@ -310,9 +310,120 @@ void Tracking::MonocularInitialization()
 		vector<bool> vbTriangulated;
 		
 		if(mpInitializer->Initialize(mCurrentFrame, mvIniMatches, Rcw, tcw, vbTriangulated))
+		{
+			for (size_t i = 0, iend = mvIniLastMatches.size(); i < iend; i++)
+			{
+				if(mvIniMatches[i] >= 0 && !vbTriangulated[i])
+				{
+					mvIniMatches[i] = -1;
+					nmatches--;
+				}
+			}
+			
+			mInitialFrame.SetPose(cv::Mat::eye(4, 4, CV_32F));
+			
+			cv::Mat Tcw = cv::Mat::eye(4, 4, CV_32F);
+			Rcw.copyTo(Tcw.rowRange(0, 3).colRange(0,3));
+			tcw.copyTo(Tcw.rowRange(0, 3).col(3));
+			mCurrentFrame.SetPose(Tcw);
+			
+			CreateInitialMapMonocular();
+		}
 	}
 }
 
+
+void Tracking::CreateInitialMapMonocular()
+{
+	KeyFrame *pKFini = new KeyFrame(mInitialFrame, mpMap, mpKeyFrameDB);
+	KeyFrame *pKFcur = new KeyFrame(mCurrentFrame, mpMap, mpKeyFrameDB);
+	
+	pKFini->ComputeBoW();
+	pKFcur->ComputeBoW();
+	
+	mpMap->AddKeyFrame(pKFini);
+	mpMap->AddKeyFrame(pKFcur);
+	
+	for (size_t i = 0; i < mvIniMatches.size(); i++)
+	{
+		if(mvIniMatches[i] < 0)
+			continue;
+		
+		cv::Mat worldPos(mvIniP3D[i]);
+		
+		MapPoint *pMP = new MapPoint(worldPos, pKFcur, mpMap);
+		
+		pKFini->AddMapPoint(pMP, i);
+		pKFcur->AddMapPoint(pKFcur, mvIniMatches[i]);
+		
+		pMP->AddObservation(pKFini, i);
+		pMP->AddObservation(pKFcur, mvIniMatches[i]);
+		
+		pMP->ComputeDistinctiveDescriptors();
+		pMP->UpdateNormalAndDepth();
+		
+		mCurrentFrame.mvpMapPoints[mvIniMatches[i]] = pMP;
+		mCurrentFrame.mvbOutlier[mvIniMatches[i]] = false;
+		
+		mpMap->AddMapPoint(pMP);
+	}
+	
+	pKFini->UpdateConnections();
+	pKFcur->UpdateConnections();
+	
+	cout << "New Map created with " << mpMap->MapPointsInMap() << " points" << endl;
+	
+	Optimizer::GlobalBundleAdjustment(mpMap, 20);
+	
+	float medianDepth = pKFini->ComputeSceneMedianDepth(2);
+	float invMedianDepth = 1.0f / medianDepth;
+	
+	if(medianDepth < 0 || pKFcur->TrackedMapPoints(1) < 100)
+	{
+		cout << "Wrong initialization, reseting..." << endl;
+		Reset();
+		return;
+	}
+	
+	
+	cv::Mat Tc2w = pKFcur->GetPose();
+	Tc2w.col(3).rowRange(0, 3) = Tc2w.col(3).rowRange(0, 3) * invMedianDepth;
+	pKFcur->SetPose(Tc2w);
+	
+	vector<MapPoint*> vpAllMapPoints = pKFini->GetMapPointMatches();
+	for (size_t iMP = 0; iMP < vpAllMapPoints.size(); iMP++)
+	{
+		if(vpAllMapPoints[iMP])
+		{
+			MapPoint* pMP = vpAllMapPoints[iMP];
+			pMP->SetWorldPos(pMP->GetWorldPos() * invMedianDepth);
+		}
+	}
+	
+	mpLocalMapper->InsertKeyFrame(pKFini);
+	mpLocalMapper->InsertKeyFrame(pKFcur);
+	
+	mCurrentFrame.SetPose(pKFcur->GetPose());
+	mnLastKeyFrameId = mCurrentFrame.mnId;
+	mpLastKeyFrame = pKFcur;
+	
+	mvpLocalKeyFrames.push_back(pKFcur);
+	mvpLocalKeyFrames.push_back(pKFini);
+	mvpLocalMapPoints = mpMap->GetAllMapPoints();
+	mpReferenceKF = pKFcur;
+	
+	mCurrentFrame.mpReferenceKF = pKFcur;
+	mLastFrame = Frame(mCurrentFrame);
+	
+	mpMap->SetReferenceMapPoints(mvpLocalMapPoints);
+	mpMapDrawer->SetCurrentCameraPose(pKFcur->GetPose);
+	mpMap->mvpKeyFrameOrigins.push_back(pKFini);
+	mState = OK;
+	
+	
+	
+	
+}
 
 
 
