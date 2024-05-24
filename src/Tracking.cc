@@ -8,7 +8,7 @@
 #include "Map.h"
 #include "Initializer.h"
 
-// #include "Optimizer.h"
+#include "Optimizer.h"
 // #include "PnPsolver.h"
 
 #include <iostream>
@@ -248,6 +248,38 @@ void Tracking::Track()
 		else
 			MonocularInitialization();
 		
+		mpFrameDrawer->Update(this);
+		
+		if(mState != OK)
+			return;
+	}
+	else
+	{
+		bool bOK;
+		
+		if(!mbOnlyTracking)
+		{
+			if(mState == OK)
+			{
+				CheckReplacedInLastFrame();
+				
+				if(mVelocity.empty() || mCurrentFrame.mnId<mnLastRelocFrameId + 2)
+				{
+					bOK = TrackReferenceKeyFrame();
+				}
+				else
+				{
+					bOK = TrackWithMotionModel();
+					if(!bOK)
+						bOK = TrackReferenceKeyFrame();
+				}
+			}
+			else
+			{
+				bOK = Relocalization();
+			}
+		}
+		
 	}
 	
 	
@@ -419,15 +451,226 @@ void Tracking::CreateInitialMapMonocular()
 	mpMapDrawer->SetCurrentCameraPose(pKFcur->GetPose);
 	mpMap->mvpKeyFrameOrigins.push_back(pKFini);
 	mState = OK;
+}
+
+void Tracking::CheckReplacedInLastFrame()
+{
+	for (int i = 0; i < mLastFrame.N; i++)
+	{
+		MapPoint *pMP = mLastFrame.mvpMapPoints[i];
+		if(pMP)
+		{
+			MapPoint *pRep = pMP->GetReplaced();
+			if(pRep)
+			{
+				mLastFrame.mvpMapPoints[i] = pRep;
+			}
+		}
+	}
+}
+
+
+bool Tracking::TrackReferenceKeyFrame()
+{
+	mCurrentFrame.ComputeBoW();
 	
+	ORBmatcher matcher(0.7, true);
 	
+	vector<MapPoint*> vpMapPointMatches;
+	
+	int nmatches = matcher.SearchByBoW(mpReferenceKF, mCurrentFrame, vpMapPointMatches);
+	if(nmatches < 15)
+		return false;
+		
+	mCurrentFrame.mvpMapPoints = vpMapPointMatches;
+	mCurrentFrame.SetPose(mLastFrame.mTcw);
+	
+	Optimizer::PoseOptimization(&mCurrentFrame);
+	
+	int nmatchesMap = 0;
+	for (int i = 0; i < mCurrentFrame.N; i++)
+	{
+		if(mCurrentFrame.mvpMapPoints[i])
+		{
+			if(mCurrentFrame.mvbOutlier[i])
+			{
+				MapPoint *pMP = mCurrentFrame.mvpMapPoints[i];
+				
+				mCurrentFrame.mvpMapPoints[i] = static_cast<MapPoint*>(NULL);
+				mCurrentFrame.mvbOutlier[i] = false;
+				pMP->mbTrackInView = false;
+				pMP->mnLastFrameSeen = mCurrentFrame.mnId;
+				nmatches--;
+			}
+			else if(mCurrentFrame.mvpMapPoints[i]->Observations() > 0)
+				nmatchesMap++;
+		}
+	}
+	return nmatchesMap >= 10;
+}
+
+void Tracking::UpdateLastFrame()
+{
+	KeyFrame *pRef = mLastFrame.mpReferenceKF;
+	cv::Mat Tlr = mlRelativeFramePoses.back();
+	
+	// l:last, r:reference, w:world
+	// Tlw = Tlr*Trw
+	mLastFrame.SetPose(Tlr * pRef->GetPose());
+	
+	if(mnLastKeyFrameId == mLastFrame.mnId || mSensor == System::MONOCULAR)
+		return;
+		
+	// Step 2：对于双目或rgbd相机，为上一帧生成新的临时地图点
+    // 注意这些地图点只是用来跟踪，不加入到地图中，跟踪完后会删除
+
+    // Create "visual odometry" MapPoints
+    // We sort points according to their measured depth by the stereo/RGB-D sensor
+    // Step 2.1：得到上一帧中具有有效深度值的特征点（不一定是地图点）
+    vector<pair<float,int> > vDepthIdx;
+    vDepthIdx.reserve(mLastFrame.N);
+
+    for(int i=0; i<mLastFrame.N;i++)
+    {
+        float z = mLastFrame.mvDepth[i];
+        if(z>0)
+        {
+            // vDepthIdx第一个元素是某个点的深度,第二个元素是对应的特征点id
+            vDepthIdx.push_back(make_pair(z,i));
+        }
+    }
+
+    // 如果上一帧中没有有效深度的点,那么就直接退出
+    if(vDepthIdx.empty())
+        return;
+
+    // 按照深度从小到大排序
+    sort(vDepthIdx.begin(),vDepthIdx.end());
+
+    // We insert all close points (depth<mThDepth)
+    // If less than 100 close points, we insert the 100 closest ones.
+    // Step 2.2：从中找出不是地图点的部分  
+    int nPoints = 0;
+    for(size_t j=0; j<vDepthIdx.size();j++)
+    {
+        int i = vDepthIdx[j].second;
+
+        bool bCreateNew = false;
+
+        // 如果这个点对应在上一帧中的地图点没有,或者创建后就没有被观测到,那么就生成一个临时的地图点
+        MapPoint* pMP = mLastFrame.mvpMapPoints[i];
+        if(!pMP)
+            bCreateNew = true;
+        else if(pMP->Observations()<1)      
+        {
+            // 地图点被创建后就没有被观测，认为不靠谱，也需要重新创建
+            bCreateNew = true;
+        }
+
+        if(bCreateNew)
+        {
+            // Step 2.3：需要创建的点，包装为地图点。只是为了提高双目和RGBD的跟踪成功率，并没有添加复杂属性，因为后面会扔掉
+            // 反投影到世界坐标系中
+            cv::Mat x3D = mLastFrame.UnprojectStereo(i);
+            MapPoint* pNewMP = new MapPoint(
+                x3D,            // 世界坐标系坐标
+                mpMap,          // 跟踪的全局地图
+                &mLastFrame,    // 存在这个特征点的帧(上一帧)
+                i);             // 特征点id
+
+            // 加入上一帧的地图点中
+            mLastFrame.mvpMapPoints[i]=pNewMP; 
+
+            // 标记为临时添加的MapPoint，之后在CreateNewKeyFrame之前会全部删除，并未添加新的观测信息
+            mlpTemporalPoints.push_back(pNewMP);
+            nPoints++;
+        }
+        else
+        {
+            // 因为从近到远排序，记录其中不需要创建地图点的个数
+            nPoints++;
+        }
+
+        // Step 2.4：如果地图点质量不好，停止创建地图点
+        // 停止新增临时地图点必须同时满足以下条件：
+        // 1、当前的点的深度已经超过了设定的深度阈值（35倍基线）
+        // 2、nPoints已经超过100个点，说明距离比较远了，可能不准确，停掉退出
+        if(vDepthIdx[j].first>mThDepth && nPoints>100)
+            break;
+    }
+}
+
+bool Tracking::Relocalization()
+{
+	mCurrentFrame.ComputeBoW();
+	
+	vector<KeyFrame*> vpCandidateKFs = mpKeyFrameDB->DetectRelocalizationCandidates(&mCurrentFrame);
 	
 	
 }
 
 
+bool Tracking::TrackWithMotionModel()
+{
+	ORBmatcher matcher(0.9, true);
+	
+	UpdateLastFrame();
+	
+	mCurrentFrame.SetPose(mVelocity * mLastFrame.mTcw);
+	
+	fill(mCurrentFrame.mvpMapPoints.begin(), mCurrentFrame.mvpMapPoints.end(), static_cast<MapPoint*>(NULL));
+	
+	int th;
+	if(mSensor != System::STEREO)
+		th = 15;
+	else
+		th = 7;
+	
+	int nmatches = matcher.SearchByProjection(mCurrentFrame, mLastFrame, th, mSensor == System::MONOCULAR);
 
-
+	if(nmatches < 20)
+	{
+		fill(mCurrentFrame.mvpMapPoints.begin(), mCurrentFrame.mvpMapPoints.end(), static_cast<MapPoint*>(NULL));
+		nmatches = matcher.SearchByProjection(mCurrentFrame, mLastFrame, 2*th, mSensor == System::MONOCULAR);
+	}
+	
+	if(nmatches < 20)
+		return false;
+	
+	Optimizer::PoseOptimization(&mCurrentFrame);
+	
+	int nmatchesMap = 0;
+	for (int i = 0; i < mCurrentFrame.N; i++)
+	{
+		if(mCurrentFrame.mvpMapPoints[i])
+		{
+			if(mCurrentFrame.mvbOutlier[i])
+			{
+				MapPoint *pMP = mCurrentFrame.mvpMapPoints[i];
+				
+				mCurrentFrame.mvpMapPoints[i] = static_cast<MapPoint*>(NULL);
+				mCurrentFrame.mvbOutlier[i] = false;
+				pMP->mbTrackInView = false;
+				pMP->mnLastFrameSeen = mCurrentFrame.mnId;
+				nmatches--;
+			}
+			else if(mCurrentFrame.mvpMapPoints[i]->Observations() > 0)
+				nmatchesMap++;
+		}
+	}
+	
+	if(mbOnlyTracking)
+	{
+		mbVO = nmatchesMap < 10;
+		return nmatches > 20;
+	}
+	
+	return nmatchesMap >= 10;
+	
+	
+	
+	
+}
 
 void Tracking::InformOnlyTracking(const bool &flag)
 {

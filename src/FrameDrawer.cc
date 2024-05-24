@@ -163,10 +163,44 @@ void FrameDrawer::DrawTextInfo(cv::Mat &im, int nState, cv::Mat &imText)
 }
 
 
-// void FrameDrawer::Update(Tracking *pTracker)
-// {
-// 	unique_lock<mutex> lock(mMutex);
-// 	pTracker->mImGray.copyTo(mIm);
-// }
+void FrameDrawer::Update(Tracking *pTracker)
+{
+	unique_lock<mutex> lock(mMutex);
+	pTracker->mImGray.copyTo(mIm);
+	mvCurrentKeys = pTracker->mCurrentFrame.mvKeys;
+	N = mvCurrentKeys.size();
+	mvbVO = vector<bool>(N, false);
+	mvbMap = vector<bool>(N, false);
+	
+	mbOnlyTracking = pTracker->mbOnlyTracking;
+	
+	if(pTracker->mLastProcessedState == Tracking::NOT_INITIALIZED)
+	{
+		mvIniKeys = pTracker->mInitialFrame.mvKeys;
+		mvIniMatches = pTracker->mvIniMatches;
+	}
+	else if(pTracker->mLastProcessedState == Tracking::OK)
+	{
+		for (int i = 0; i < N; i++)
+		{
+			MapPoint *pMP = pTracker->mCurrentFrame.mvpMapPoints[i];
+			if(pMP)
+			{
+				if(pMP)
+				{
+					if(!pTrack->mCurrentFrame.mvbOutlier[i])
+					{
+						if(pMP->Observations() > 0)
+							mvbMap[i] = true;
+						else
+							mvbVO[i] = true;
+					}
+				}
+			}
+		}
+	}
+	
+	mState = static_cast<int>(pTracker->mLastProcessedState);
+}
 
 } // namespace ORB_SLAM2
