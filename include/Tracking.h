@@ -86,6 +86,8 @@ protected:
 	
 	void Track();
 	
+	void StereoInitialization();
+	
 	void MonocularInitialization();
 	
 	void CreateInitialMapMonocular();

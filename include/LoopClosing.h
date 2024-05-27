@@ -77,7 +77,7 @@ protected:
 	
 	void RestIfRequested();
 	
-	bool mbRestRequested;
+	bool mbResetRequested;
 	
 	std::mutex mMutexReset;
 	

@@ -9,7 +9,7 @@
 #include "Initializer.h"
 
 #include "Optimizer.h"
-// #include "PnPsolver.h"
+#include "PnPsolver.h"
 
 #include <iostream>
 #include <cmath>
@@ -605,6 +605,15 @@ bool Tracking::Relocalization()
 	mCurrentFrame.ComputeBoW();
 	
 	vector<KeyFrame*> vpCandidateKFs = mpKeyFrameDB->DetectRelocalizationCandidates(&mCurrentFrame);
+	
+	if(vpCandidateKFs.empty())
+		return false;
+	
+	const int nKFs = vpCandidateKFs.size();
+	
+	ORBmatcher matcher(0.75, true);
+	
+	vector<PnPsolver*> vpPnPsolvers;
 	
 	
 }

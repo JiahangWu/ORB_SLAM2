@@ -51,9 +51,9 @@ private:
 	
 	float mImageWidth, mImageHeight;
 	
-	float mViewpointX, mViewPointY, mViewpointZ, mViewpointF;
+	float mViewpointX, mViewpointY, mViewpointZ, mViewpointF;
 	
-	bool CheackFinish();
+	bool CheckFinish();
 	
 	void SetFinish();
 	

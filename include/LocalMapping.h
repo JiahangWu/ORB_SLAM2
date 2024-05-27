@@ -42,7 +42,9 @@ public:
 	
 	bool stopRequested();
 	
-	bool AcceptKeyFrames(bool flag);
+	bool AcceptKeyFrame();
+	
+	void SetAcceptKeyFrames(bool flag);
 	
 	bool SetNotStop(bool flag);
 	
